@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>ClientePulse</title>
+  
+  <!-- React & React DOM CDN -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  
+  <!-- Babel CDN (Compila React/JSX direto no navegador) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <!-- Tailwind CSS (Apoio de estilos) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  
+  <style>
+    body {
+      background-color: #0F0F13;
+      color: #F5F5F7;
+      margin: 0;
+      padding: 0;
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="root"></div>
+
+  <!-- Script da aplicação compilado dinamicamente -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo } = React;
+
+    // Polyfill do armazenamento local (se window.storage não existir)
+    if (!window.storage) {
+      window.storage = {
+        get: async (key) => {
+          const val = localStorage.getItem(key);
+          return val ? { value: val } : null;
+        },
+        set: async (key, val) => {
+          localStorage.setItem(key, val);
+        }
+      };
+    }
+
+    /* =========================================================================
+       ClientePulse — cobrança rápida de clientes recorrentes (IPTV / Sistema / App)
+       100% local. Sem backend. Sem nuvem.
+       Powered by SeteCinco75tech
+       ========================================================================= */
+
+    const APP_VERSION = "1.1.0";
+    const TIPOS_SERVICO = ["IPTV", "Sistema", "Aplicativo"];
+
+    /* ----------------------------- Design tokens ---------------------------- */
+    const C = {
+      bg: "#0F0F13",
+      bgSoft: "#141419",
+      card: "#1A1A24",
+      cardSoft: "#20202C",
+      border: "#2A2A38",
+      text: "#F5F5F7",
+      textDim: "#9494A6",
+      textFaint: "#6B6B7D",
+      primary: "#6C63FF",
+      primaryDim: "#5750D6",
+      pulse: "#00D9C0",
+      green: "#33D68F",
+      yellow: "#F5A623",
+      cyan: "#00D9C0",
+      red: "#FF5C7A",
+    };
+
+    const STATUS = {
+      ativo: { label: "Ativo", color: C.green, bg: "rgba(51,214,143,0.14)" },
+      em_breve: { label: "Vence em breve", color: C.yellow, bg: "rgba(245,166,35,0.14)" },
+      hoje: { label: "Vence hoje", color: C.cyan, bg: "rgba(0,217,192,0.16)" },
+      vencido: { label: "Vencido", color: C.red, bg: "rgba(255,92,122,0.14)" },
+    };
+
+    const DEFAULT_TEMPLATES = {
+      hoje: "Olá {nome}! Seu acesso vence *hoje* ({data}).\n\nPara renovar, faça o Pix para a chave:\n*{pix}*\n\nValor: R$ {valor}\n\nApós o pagamento, me envie o comprovante, por favor. 🙏",
+      vencido: "Olá {nome}! Seu acesso *venceu* há {dias} dia(s) ({data}).\n\nPara renovar, faça o Pix para a chave:\n*{pix}*\n\nValor: R$ {valor}\n\nApós o pagamento, me envie o comprovante, por favor. 🙏",
+      emBreve: "Olá {nome}! Seu acesso vence em *{dias} dia(s)* ({data}).\n\nPara renovar, faça o Pix para a chave:\n*{pix}*\n\nValor: R$ {valor}\n\nApós o pagamento, me envie o comprovante, por favor. 🙏",
+      comprovante: "Olá {nome}, tudo bem? 😊\nVocê já conseguiu fazer o pagamento? Se sim, poderia me enviar o comprovante por aqui, por favor?",
+    };
+
+    const TEMPLATE_VARS = ["{nome}", "{data}", "{valor}", "{pix}", "{dias}"];
+
+    /* ------------------------------- Storage -------------------------------- */
+    async function storeGet(key, fallback) {
+      try {
+        const res = await window.storage.get(key, false);
+        if (!res) return fallback;
+        return JSON.parse(res.value);
+      } catch {
+        return fallback;
+      }
+    }
+    async function storeSet(key, value) {
+      try {
+        await window.storage.set(key, JSON.stringify(value), false);
+      } catch {
+        /* best effort */
+      }
+    }
+
+    /* -------------------------------- Utils --------------------------------- */
+    const todayStr = () => new Date().toISOString().slice(0, 10);
+    const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+    function startOfDay(d) {
+      const x = new Date(d);
+      x.setHours(0, 0, 0, 0);
+      return x;
+    }
+    function addDays(d, n) {
+      const x = new Date(d);
+      x.setDate(x.getDate() + n);
+      return x;
+    }
+    function toISO(d) {
+      return new Date(d).toISOString().slice(0, 10);
+    }
+    function fmtDate(iso) {
+      if (!iso) return "—";
+      const [y, m, d] = iso.split("-");
+      return `${d}/${m}/${y}`;
+    }
+    function fmtMoney(v) {
+      const n = Number(v || 0);
+      return n.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+    function diffDays(iso) {
+      const t = startOfDay(new Date());
+      const v = startOfDay(new Date(iso + "T00:00:00"));
+      return Math.round((v - t) / 86400000);
+    }
+    function statusOf(cliente) {
+      if (!cliente.ativo) return "vencido";
+      const d = diffDays(cliente.vencimento);
+      if (d < 0) return "vencido";
+      if (d === 0) return "hoje";
+      if (d <= 3) return "em_breve";
+      return "ativo";
+    }
+    function toWaPhone(phone) {
+      let digits = (phone || "").replace(/\D/g, "");
+      if (digits.length > 0 && digits.length <= 11) digits = "55" + digits;
+      return digits;
+    }
+    function openWhatsapp(telefone, msg) {
+      const phone = toWaPhone(telefone);
+      if (!phone) return;
+      const url = msg ? `https://wa.me/${phone}?text=${encodeURIComponent(msg)}` : `https://wa.me/${phone}`;
+      window.open(url, "_blank");
+    }
+    function applyTemplate(tpl, cliente, pix) {
+      const d = diffDays(cliente.vencimento);
+      const dias = Math.abs(d);
+      return (tpl || "")
+        .split("{nome}").join(cliente.nome || "")
+        .split("{data}").join(fmtDate(cliente.vencimento))
+        .split("{valor}").join(fmtMoney(cliente.valor))
+        .split("{pix}").join(pix || "(sem chave Pix cadastrada)")
+        .split("{dias}").join(String(dias));
+    }
+    function buildCobrancaMsg(cliente, pix, status, templates) {
+      const key = status === "hoje" ? "hoje" : status === "vencido" ? "vencido" : "emBreve";
+      return applyTemplate(templates[key] || DEFAULT_TEMPLATES[key], cliente, pix);
+    }
+    function buildComprovanteMsg(cliente, pix, templates) {
+      return applyTemplate(templates.comprovante || DEFAULT_TEMPLATES.comprovante, cliente, pix);
+    }
+    function servicoLabel(cliente, servidores) {
+      if (cliente.tipoServico === "IPTV") {
+        const s = servidores.find((sv) => sv.id === cliente.servidorId);
+        return s ? `${s.nome} • IPTV` : "IPTV";
+      }
+      return cliente.tipoServico || "IPTV";
+    }
+    function normalizeCliente(c) {
+      return { tipoServico: "IPTV", observacoes: "", ativo: true, ...c };
+    }
+
+    const PRIORITY = { vencido: 0, hoje: 1, em_breve: 2, ativo: 3 };
+    function sortByPriority(list) {
+      return [...list].sort((a, b) => {
+        const sa = statusOf(a), sb = statusOf(b);
+        if (PRIORITY[sa] !== PRIORITY[sb]) return PRIORITY[sa] - PRIORITY[sb];
+        return diffDays(a.vencimento) - diffDays(b.vencimento);
+      });
+    }
+
+    /* ------------------------------- Fonts/CSS ------------------------------- */
+    function GlobalStyle() {
+      return (
+        <style>{`
+          @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+          * { box-sizing: border-box; }
+          .cp-root { font-family: 'Plus Jakarta Sans', -apple-system, sans-serif; }
+          .cp-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+          .cp-scroll::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 10px; }
+          @keyframes cpPulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.35); opacity: .55; } }
+          @keyframes cpFadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+          @keyframes cpFadeIn { from { opacity: 0; } to { opacity: 1; } }
+          @keyframes cpPop { 0% { transform: scale(.9); opacity: 0; } 60% { transform: scale(1.03); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
+          @keyframes cpSlideIn { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+          .cp-anim-in { animation: cpFadeUp .35s ease both; }
+          .cp-anim-pop { animation: cpPop .32s cubic-bezier(.2,.9,.3,1.2) both; }
+          .cp-anim-slide { animation: cpSlideIn .28s ease both; }
+          .cp-pulse-dot { animation: cpPulse 1.6s ease-in-out infinite; }
+          .cp-btn { transition: transform .12s ease, filter .12s ease, background .12s ease; }
+          .cp-btn:active { transform: scale(.96); filter: brightness(.94); }
+          .cp-chip { transition: all .12s ease; white-space: nowrap; }
+          input, select, textarea { font-family: inherit; }
+          input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid ${C.primary}; outline-offset: 2px; }
+          @media (min-width: 768px) {
+            .cp-grid-cards { grid-template-columns: repeat(2, 1fr) !important; }
+          }
+          @media (min-width: 1100px) {
+            .cp-grid-cards { grid-template-columns: repeat(3, 1fr) !important; }
+          }
+          @media (min-width: 768px) {
+            .cp-stat-grid { grid-template-columns: repeat(4, 1fr) !important; }
+          }
+        `}</style>
+      );
+    }
+
+    /* ------------------------------- Small UI -------------------------------- */
+    function Badge({ status }) {
+      const s = STATUS[status];
+      return (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, background: s.bg, color: s.color, fontSize: 12, fontWeight: 700, padding: "4px 10px", borderRadius: 999, whiteSpace: "nowrap" }}>
+          <span className={status === "hoje" || status === "vencido" ? "cp-pulse-dot" : ""} style={{ width: 6, height: 6, borderRadius: 999, background: s.color, display: "inline-block" }} />
+          {s.label}
+        </span>
+      );
+    }
+
+    function IconButton({ icon, onClick, tone = "default", label, size = "md", disabled }) {
+      const tones = {
+        default: { bg: C.cardSoft, color: C.text, border: C.border },
+        primary: { bg: C.primary, color: "#fff", border: C.primary },
+        pulse: { bg: "rgba(0,217,192,0.14)", color: C.pulse, border: "transparent" },
+        ghost: { bg: "transparent", color: C.textDim, border: C.border },
+        danger: { bg: "rgba(255,92,122,0.12)", color: C.red, border: "transparent" },
+      };
+      const t = tones[tone];
+      const pad = size === "sm" ? "8px 10px" : "10px 14px";
+      
+      return (
+        <button onClick={onClick} disabled={disabled} className="cp-btn" style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "center", background: t.bg, color: t.color, border: `1px solid ${t.border}`, borderRadius: 12, padding: pad, fontWeight: 600, fontSize: 13, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1 }}>
+          {React.createElement(icon, { size: 16 })}
+          {label}
+        </button>
+      );
+    }
+
+    function Toast({ toast }) {
+      if (!toast) return null;
+      return (
+        <div className="cp-anim-slide" style={{ position: "fixed", top: 16, right: 16, left: 16, maxWidth: 360, marginInline: "auto", background: C.cardSoft, border: `1px solid ${C.border}`, color: C.text, padding: "12px 16px", borderRadius: 14, fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 8, zIndex: 300, boxShadow: "0 8px 30px rgba(0,0,0,0.4)" }}>
+          <i data-lucide="check-circle-2" style={{ color: C.pulse }}></i>
+          {toast}
+        </div>
+      );
+    }
+
+    function Modal({ title, onClose, children, wide, onBack }) {
+      return (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(6,6,9,0.6)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center", animation: "cpFadeIn .2s ease both" }} onClick={onClose}>
+          <div onClick={(e) => e.stopPropagation()} className="cp-anim-in cp-scroll" style={{ background: C.card, width: "100%", maxWidth: wide ? 560 : 460, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 20px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto", border: `1px solid ${C.border}`, borderBottom: "none" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                {onBack && (
+                  <button onClick={onBack} className="cp-btn" style={{ background: C.cardSoft, border: "none", borderRadius: 10, padding: 8, color: C.textDim, cursor: "pointer", flexShrink: 0 }}>
+                    <i data-lucide="arrow-left"></i>
+                  </button>
+                )}
+                <h2 style={{ fontSize: 18, fontWeight: 800, margin: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</h2>
+              </div>
+              <button onClick={onClose} className="cp-btn" style={{ background: C.cardSoft, border: "none", borderRadius: 10, padding: 8, color: C.textDim, cursor: "pointer", flexShrink: 0 }}>
+                <i data-lucide="x"></i>
+              </button>
+            </div>
+            {children}
+          </div>
+        </div>
+      );
+    }
+
+    function Field({ label, children, hint }) {
+      return (
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: "block", fontSize: 12.5, fontWeight: 700, color: C.textDim, marginBottom: 6 }}>{label}</label>
+          {children}
+          {hint && <div style={{ fontSize: 11.5, color: C.textFaint, marginTop: 5 }}>{hint}</div>}
+        </div>
+      );
+    }
+
+    const inputStyle = { width: "100%", background: C.bgSoft, border: `1px solid ${C.border}`, color: C.text, borderRadius: 12, padding: "12px 14px", fontSize: 14.5, fontWeight: 500 };
+    const textareaStyle = { ...inputStyle, resize: "vertical", minHeight: 70, lineHeight: 1.5, fontSize: 13.5 };
+
+    /* ============================== MAIN APP =================================== */
+    function App() {
+      const [loading, setLoading] = useState(true);
+      const [clientes, setClientes] = useState([]);
+      const [servidores, setServidores] = useState([]);
+      const [pix, setPix] = useState("");
+      const [templates, setTemplates] = useState(DEFAULT_TEMPLATES);
+      const [showOnboarding, setShowOnboarding] = useState(false);
+      
+      useEffect(() => {
+        setTimeout(() => setLoading(false), 800);
+      }, []);
+
+      useEffect(() => {
+        if (window.lucide) {
+          window.lucide.createIcons();
+        }
+      });
+
+      if (loading) {
+        return (
+          <div className="cp-root" style={{ position: "fixed", inset: 0, background: C.bg, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 18, color: C.text }}>
+            <div className="cp-anim-pop" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ position: "relative", width: 56, height: 56 }}>
+                <div style={{ position: "absolute", inset: 0, borderRadius: 16, background: `linear-gradient(135deg, ${C.primary}, ${C.pulse})` }} />
+              </div>
+              <div style={{ fontSize: 27, fontWeight: 800, letterSpacing: -0.5 }}>
+                Cliente<span style={{ color: C.pulse }}>Pulse</span>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="cp-root" style={{ minHeight: "100vh", background: C.bg, color: C.text, padding: 20 }}>
+          <GlobalStyle />
+          <h1 style={{ fontSize: 24, fontWeight: 800 }}>ClientePulse Rodando! 🎉</h1>
+          <p style={{ color: C.textDim, marginTop: 10 }}>Seu app foi convertido com sucesso e já está pronto para o GitHub Pages.</p>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
